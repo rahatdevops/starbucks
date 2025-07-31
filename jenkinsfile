@@ -1,0 +1,103 @@
+pipeline {
+    agent any
+    tools {
+        jdk 'jdk17'
+        nodejs 'node16'
+    }
+    environment {
+        SCANNER_HOME = tool 'sonar-scanner'
+    }
+    stages {
+        stage ("Clean Workspace") {
+            steps {
+                cleanWs()
+            }
+        }
+
+        stage ("Git Checkout") {
+            steps {
+                git branch: 'main', url: 'https://github.com/rahatdevops/starbucks.git'
+            }
+        }
+
+        stage("Sonarqube Analysis") {
+            steps {
+                withSonarQubeEnv('sonar-server') {
+                    sh '''$SCANNER_HOME/bin/sonar-scanner \
+                        -Dsonar.projectName=starbucks \
+                        -Dsonar.projectKey=starbucks'''
+                }
+            }
+        }
+
+        stage("Quality Gate") {
+            steps {
+                script {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'Sonar-token'
+                }
+            }
+        }
+
+        stage("Install NPM Dependencies") {
+            steps {
+                sh "npm install"
+            }
+        }
+
+        stage("OWASP FS SCAN") {
+            environment {
+                NVD_API_KEY = credentials('NVD_API_KEY')
+            }
+            steps {
+                dependencyCheck additionalArguments: '''--scan ./ \
+                    --disableYarnAudit \
+                    --disableNodeAudit \
+                    --nvdApiKey ${NVD_API_KEY}''',
+                    odcInstallation: 'DP-Check'
+                
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+            }
+        }
+
+        stage ("Trivy File Scan") {
+            steps {
+                sh "trivy fs . > trivy.txt"
+            }
+        }
+
+        stage ("Build Docker Image") {
+            steps {
+                sh "docker build -t starbucks ."
+            }
+        }
+
+        stage ("Tag & Push to DockerHub") {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker') {
+                        sh "docker tag starbucks rahat6/starbucks:latest"
+                        sh "docker push rahat6/starbucks:latest"
+                    }
+                }
+            }
+        }
+
+        stage("Docker Scout Image") {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker', toolName: 'docker') {
+                        sh 'docker-scout quickview rahat6/starbucks:latest'
+                        sh 'docker-scout cves rahat6/starbucks:latest'
+                        sh 'docker-scout recommendations rahat6/starbucks:latest'
+                    }
+                }
+            }
+        }
+
+        stage ("Deploy to Container") {
+            steps {
+                sh 'docker run -d --name starbucks -p 3000:3000 rahat6/starbucks:latest'
+            }
+        }
+    }
+}
